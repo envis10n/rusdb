@@ -1,0 +1,68 @@
+syntax = "proto3";
+package grpc;
+
+service RusDB {
+    rpc Insert(InsertRequest) returns (InsertResponses);
+    rpc Find(FindRequest) returns (FindResponse);
+    rpc Remove(RemoveRequest) returns (RemoveResponse);
+    rpc Update(UpdateRequest) returns (UpdateResponses);
+    rpc Get(GetRequest) returns (GetResponse);
+}
+
+message FindRequest {
+    string collection = 1;
+    optional bytes filter = 2;
+    optional uint32 limit = 3;
+}
+
+message FindResponse {
+    repeated bytes documents = 1;
+    uint32 count = 2;
+}
+
+message InsertRequest {
+    string collection = 1;
+    repeated bytes documents = 2;
+    bool return_old = 3;
+}
+
+message InsertResponse {
+    string _id = 1;
+    optional bytes document = 2;
+}
+
+message InsertResponses {
+    repeated InsertResponse inserts = 1;
+    uint32 count = 2;
+}
+
+message RemoveRequest {
+    string collection = 1;
+    bytes filter = 2;
+    optional uint32 limit = 3;
+}
+
+message RemoveResponse {
+    uint32 count = 1;
+}
+
+message UpdateRequest {
+    string collection = 1;
+    bytes filter = 2;
+    bytes updates = 3;
+    optional uint32 limit = 4;
+}
+
+message UpdateResponses {
+    repeated bytes updated = 1;
+    uint32 count = 2;
+}
+
+message GetRequest {
+    string collection = 1;
+    string _id = 2;
+}
+
+message GetResponse {
+    optional bytes document = 1;
+}

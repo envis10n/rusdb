@@ -1,0 +1,20 @@
+[package]
+name = "rusdb"
+version = "0.1.0"
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+bson = { version = "2", features = ["uuid-0_8"] }
+uuid = { version = "0.8", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+prost = "0.8.0"
+tonic = "0.5.2"
+toml = "0.5"
+lazy_static = "1.4.0"
+async_once = "0.2.1"
+
+[build-dependencies]
+tonic-build = "0.5.2"
