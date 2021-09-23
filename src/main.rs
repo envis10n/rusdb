@@ -18,6 +18,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use tokio::sync::broadcast::{channel as broadcast, Receiver, Sender};
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 
@@ -26,6 +27,10 @@ lazy_static! {
         let conf = config::load().await;
         RusDbEngine::create(&conf.engine).await
     });
+    static ref SHUTDOWN_CHANNEL: (Arc<Sender<bool>>, Receiver<bool>) = {
+        let (sender, receiver) = broadcast(1);
+        (Arc::new(sender), receiver)
+    };
 }
 
 #[derive(Debug, Default)]
@@ -335,41 +340,66 @@ use simplelog::*;
 
 #[tokio::main]
 async fn main() {
-    let conf = config::load().await;
-    let log_conf = conf.logging.unwrap_or_default();
-    let level = log_conf.log_level();
-    let mut loggers: Vec<Box<(dyn SharedLogger + 'static)>> =
-        vec![SimpleLogger::new(level.clone(), Config::default())];
-    if let Some(log_path) = &log_conf.path {
-        let mut p = PathBuf::new();
-        p.push(log_path);
-        if !p.is_absolute() {
-            p = std::env::current_dir().unwrap();
-            p.push(&conf.engine.dir.unwrap_or("./rusdb".to_string()));
+    tokio::spawn(async {
+        let conf = config::load().await;
+        let log_conf = conf.logging.unwrap_or_default();
+        let level = log_conf.log_level();
+        let mut loggers: Vec<Box<(dyn SharedLogger + 'static)>> =
+            vec![SimpleLogger::new(level.clone(), Config::default())];
+        if let Some(log_path) = &log_conf.path {
+            let mut p = PathBuf::new();
             p.push(log_path);
+            if !p.is_absolute() {
+                p = std::env::current_dir().unwrap();
+                p.push(&conf.engine.dir.unwrap_or("./rusdb".to_string()));
+                p.push(log_path);
+            }
+            match level {
+                log::LevelFilter::Off => {}
+                _ => loggers.push(WriteLogger::new(
+                    level.clone(),
+                    Config::default(),
+                    File::create(&p).unwrap(),
+                )),
+            }
         }
-        match level {
-            log::LevelFilter::Off => {}
-            _ => loggers.push(WriteLogger::new(
-                level.clone(),
-                Config::default(),
-                File::create(&p).unwrap(),
-            )),
+        CombinedLogger::init(loggers).unwrap();
+        let _engine = ENGINE.get().await.clone();
+        info!(
+            "Starting gRPC server at {}:{}...",
+            conf.grpc.ip, conf.grpc.port
+        );
+        let addr = format!("{}:{}", conf.grpc.ip, conf.grpc.port)
+            .parse()
+            .unwrap();
+        let rusdb_server = RusDbServ::default();
+        Server::builder()
+            .add_service(RusDbServer::new(rusdb_server))
+            .serve_with_shutdown(addr, async {
+                let shutdown = SHUTDOWN_CHANNEL.0.clone();
+                let mut chan = shutdown.subscribe();
+                match chan.recv().await {
+                    _ => {}
+                }
+            })
+            .await
+            .unwrap();
+    });
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => {
+            debug!("Shutdown signal received.");
+        }
+        Err(e) => {
+            error!("Unable to listen for shutdown signal: {}", e);
         }
     }
-    CombinedLogger::init(loggers).unwrap();
-    let _engine = ENGINE.get().await.clone();
-    info!(
-        "Starting gRPC server at {}:{}...",
-        conf.grpc.ip, conf.grpc.port
-    );
-    let addr = format!("{}:{}", conf.grpc.ip, conf.grpc.port)
-        .parse()
-        .unwrap();
-    let rusdb_server = RusDbServ::default();
-    Server::builder()
-        .add_service(RusDbServer::new(rusdb_server))
-        .serve(addr)
-        .await
-        .unwrap();
+    let shutdown = SHUTDOWN_CHANNEL.0.clone();
+    match shutdown.send(true) {
+        _ => loop {
+            if shutdown.receiver_count() <= 1 {
+                break;
+            }
+        },
+    }
+    info!("Shutdown complete.");
 }
