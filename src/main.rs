@@ -5,12 +5,17 @@ mod grpc {
     tonic::include_proto!("grpc");
 }
 
+#[macro_use]
+extern crate log;
+
 use async_once::AsyncOnce;
 use bson::{doc, Document};
 use engine::RusDbEngine;
 use grpc::rus_db_server::{RusDb, RusDbServer};
 use grpc::*;
 use lazy_static::lazy_static;
+use std::fs::File;
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use tonic::{transport::Server, Request, Response, Status};
@@ -326,12 +331,35 @@ impl RusDb for RusDbServ {
     }
 }
 
+use simplelog::*;
+
 #[tokio::main]
 async fn main() {
-    println!("Loading configuration...");
     let conf = config::load().await;
+    let log_conf = conf.logging.unwrap_or_default();
+    let level = log_conf.log_level();
+    let mut loggers: Vec<Box<(dyn SharedLogger + 'static)>> =
+        vec![SimpleLogger::new(level.clone(), Config::default())];
+    if let Some(log_path) = &log_conf.path {
+        let mut p = PathBuf::new();
+        p.push(log_path);
+        if !p.is_absolute() {
+            p = std::env::current_dir().unwrap();
+            p.push(&conf.engine.dir.unwrap_or("./rusdb".to_string()));
+            p.push(log_path);
+        }
+        match level {
+            log::LevelFilter::Off => {}
+            _ => loggers.push(WriteLogger::new(
+                level.clone(),
+                Config::default(),
+                File::create(&p).unwrap(),
+            )),
+        }
+    }
+    CombinedLogger::init(loggers).unwrap();
     let _engine = ENGINE.get().await.clone();
-    println!(
+    info!(
         "Starting gRPC server at {}:{}...",
         conf.grpc.ip, conf.grpc.port
     );

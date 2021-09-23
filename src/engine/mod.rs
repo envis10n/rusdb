@@ -1,21 +1,23 @@
-use bson::{Bson, Document};
-use serde::{Deserialize, Serialize};
+use crate::config::EngineConfig;
+use bson::Document;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tokio::fs;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::config::EngineConfig;
-
 pub type RusDbCollection = Arc<RwLock<BTreeMap<Uuid, Document>>>;
+struct RusCollection {
+    pub last_access: SystemTime,
+    pub flush_at: SystemTime,
+    pub collection: RusDbCollection,
+}
 
 #[derive(Clone)]
 pub struct RusDbEngine {
-    cache: Arc<RwLock<BTreeMap<String, RusDbCollection>>>,
+    cache: Arc<RwLock<BTreeMap<String, RusCollection>>>,
     config: Arc<EngineConfig>,
 }
 
@@ -50,9 +52,10 @@ async fn col_exists_file(path: &PathBuf) -> Option<Vec<u8>> {
 
 impl RusDbEngine {
     pub async fn create(config: &EngineConfig) -> Arc<Self> {
-        if !dir_exists(&config.dir).await {
+        let _dir = config.dir.clone().unwrap_or("./rusdb".to_string());
+        if !dir_exists(&_dir).await {
             let mut p = std::env::current_dir().unwrap();
-            p.push(&config.dir);
+            p.push(&_dir);
             p.push("collections");
             fs::create_dir_all(&p).await.unwrap();
         }
@@ -64,70 +67,129 @@ impl RusDbEngine {
         });
 
         let engine_inner = engine.clone();
+        let engine_inner_2 = engine.clone();
+
+        tokio::spawn(async move {
+            let engine = engine_inner_2;
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                let engine = engine.clone();
+                engine.flush_cache().await;
+            }
+        });
 
         tokio::spawn(async move {
             let config = inner_conf;
             let engine = engine_inner;
             loop {
                 tokio::time::sleep(Duration::from_secs(60u64 * config.cache_time as u64)).await;
-                println!("Syncing RusDb cache to disk...");
                 let engine = engine.clone();
                 engine.sync_cache().await;
-                println!("RusDb cache synchronized to disk.");
             }
         });
         engine
     }
     fn get_dir(&self) -> PathBuf {
         let mut p = std::env::current_dir().unwrap();
-        p.push(&self.config.dir);
+        p.push(&self.config.dir.clone().unwrap_or("./rusdb".to_string()));
         p
+    }
+    pub async fn flush_cache(&self) {
+        let mut lock = self.cache.write().await;
+        let mut entries: Vec<String> = vec![];
+        let now = SystemTime::now();
+        for (k, v) in &*lock {
+            if &now >= &v.flush_at {
+                // flush from the cache.
+                debug!("Flushing {} from the cache...", k);
+                let mut path = self.get_dir();
+                path.push("collections");
+                path.push(format!("{}.bson", k));
+                let ilock = v.collection.read().await;
+                let data = bson::to_vec(&*ilock).unwrap();
+                fs::write(&path, &data).await.unwrap();
+                entries.push(k.clone());
+            }
+        }
+        for entry in entries.drain(..) {
+            (*lock).remove(&entry);
+        }
     }
     pub async fn sync_cache(&self) {
         let lock = self.cache.read().await;
-        for (k, v) in &*lock {
-            let mut path = self.get_dir();
-            path.push("collections");
-            path.push(format!("{}.bson", k));
-            let ilock = v.read().await;
-            let data = bson::to_vec(&*ilock).unwrap();
-            fs::write(&path, &data).await.unwrap();
+        if (*lock).len() > 0 {
+            for (k, v) in &*lock {
+                let v = &v.collection;
+                let mut path = self.get_dir();
+                path.push("collections");
+                path.push(format!("{}.bson", k));
+                let ilock = v.read().await;
+                let data = bson::to_vec(&*ilock).unwrap();
+                fs::write(&path, &data).await.unwrap();
+            }
         }
     }
     pub async fn get_collection(&self, name: &str) -> Option<RusDbCollection> {
+        debug!("Attempting to load collection: {}", name);
         let is_cached = {
             let lock = self.cache.read().await;
             (*lock).contains_key(name)
         };
         if !is_cached {
+            debug!("Collection is not cached.");
             let mut path = self.get_dir();
             path.push("collections");
             path.push(format!("{}.bson", &name));
             if let Some(data) = col_exists_file(&path).await {
+                debug!("Loaded collection from disk.");
                 let btree: RusDbCollection = Arc::new(RwLock::new(
                     bson::from_slice::<BTreeMap<Uuid, Document>>(&data).unwrap(),
                 ));
+                let now = SystemTime::now();
+                let icol = RusCollection {
+                    collection: btree.clone(),
+                    last_access: now.clone(),
+                    flush_at: now
+                        .checked_add(Duration::from_secs(self.config.flush_time as u64 * 60u64))
+                        .unwrap(),
+                };
                 {
                     let mut lock = self.cache.write().await;
-                    (*lock).insert(name.to_string(), btree.clone());
+                    (*lock).insert(name.to_string(), icol);
                 }
                 Some(btree)
             } else {
                 // Doesn't exist, create it.
+                debug!("Writing empty collection to disk.");
                 let btree: BTreeMap<Uuid, Document> = BTreeMap::new();
                 let data = bson::to_vec(&btree).unwrap();
                 fs::write(&path, &data).await.unwrap();
                 let btree = Arc::new(RwLock::new(btree));
+                let now = SystemTime::now();
+                let icol = RusCollection {
+                    collection: btree.clone(),
+                    last_access: now.clone(),
+                    flush_at: now
+                        .checked_add(Duration::from_secs(self.config.flush_time as u64 * 60u64))
+                        .unwrap(),
+                };
                 {
                     let mut lock = self.cache.write().await;
-                    (*lock).insert(name.to_string(), btree.clone());
+                    (*lock).insert(name.to_string(), icol);
                 }
                 Some(btree)
             }
         } else {
-            let lock = self.cache.read().await;
-            if let Some(col) = (*lock).get(name) {
-                Some(col.clone())
+            debug!("Collection was cached.");
+            let mut lock = self.cache.write().await;
+            if let Some(col) = (*lock).get_mut(name) {
+                let now = SystemTime::now();
+                col.last_access = now.clone();
+                col.flush_at = now
+                    .checked_add(Duration::from_secs(self.config.flush_time as u64 * 60u64))
+                    .unwrap();
+                debug!("Flushing the cache at {:?}", &col.flush_at);
+                Some(col.collection.clone())
             } else {
                 None
             }

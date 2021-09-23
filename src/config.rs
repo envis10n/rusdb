@@ -1,3 +1,5 @@
+use std::default;
+
 use serde::{Deserialize, Serialize};
 use tokio::fs;
 use toml;
@@ -20,14 +22,53 @@ impl Default for GrpcConfig {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct EngineConfig {
     pub cache_time: u32,
-    pub dir: String,
+    pub flush_time: u32,
+    pub dir: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct LogConfig {
+    pub path: Option<String>,
+    pub level: Option<u8>,
+}
+
+impl LogConfig {
+    pub fn log_level(&self) -> log::LevelFilter {
+        if let Some(lv) = self.level {
+            match lv {
+                0 => log::LevelFilter::Off,
+                1 => log::LevelFilter::Error,
+                2 => log::LevelFilter::Warn,
+                3 => log::LevelFilter::Info,
+                4 => log::LevelFilter::Debug,
+                5 => log::LevelFilter::Trace,
+                _ => log::LevelFilter::Trace,
+            }
+        } else {
+            if cfg!(debug_assertions) {
+                log::LevelFilter::Debug
+            } else {
+                log::LevelFilter::Info
+            }
+        }
+    }
+}
+
+impl Default for LogConfig {
+    fn default() -> Self {
+        Self {
+            path: None,
+            level: None,
+        }
+    }
 }
 
 impl Default for EngineConfig {
     fn default() -> Self {
         Self {
             cache_time: 1,
-            dir: "./rusdb".to_string(),
+            flush_time: 10,
+            dir: None,
         }
     }
 }
@@ -36,6 +77,7 @@ impl Default for EngineConfig {
 pub struct RusDbConfig {
     pub grpc: GrpcConfig,
     pub engine: EngineConfig,
+    pub logging: Option<LogConfig>,
 }
 
 pub async fn load() -> RusDbConfig {
@@ -57,11 +99,12 @@ pub async fn load() -> RusDbConfig {
             }
         }
     } else {
-        println!("Unable to find config file. Creating defaults...");
+        warn!("Unable to find config file. Creating defaults...");
         let config = RusDbConfig::default();
         fs::write(".rusdb.toml", toml::to_vec(&config).unwrap())
             .await
             .unwrap();
-        config
+        println!("Default configuration file created. Please run again.");
+        std::process::exit(1);
     }
 }

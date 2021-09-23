@@ -26,17 +26,17 @@ If a configuration file does not exist, and the file can be created, a default f
 
 Example:
 ```toml
-# The gRPC server configuration.
 [grpc]
-# The address to bind on.
-ip = "127.0.0.1"
-# The port to bind on.
-port = 8009
+ip = "127.0.0.1" # Required - gRPC bind hostname/address.
+port = 8009 # Required - gRPC bind port
 
-# The database engine configuration.
 [engine]
-# The time (in minutes) to wait between flushes to disk.
-cache_time = 1
-# The database directory to use. Will be created if it does not exist.
-dir = "rusdb"
+cache_time = 1 # Required - Cache disk sync time in minutes.
+flush_time = 10 # Required - Flush time in minutes.
+dir = "./rusdb" # Optional - Default "./rusdb"
+
+[logging] # Optional - Default: None
+path = "./rusdb.log" # Optional - Default: "./rusdb.log" - Relative paths place it inside of the data directory.
+level = 4 # Optional - Default: 2 (LevelFilter::Info) - Anything outside of 0-5 will be LevelFilter::Trace.
+
 ```
