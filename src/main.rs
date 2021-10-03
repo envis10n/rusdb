@@ -22,6 +22,14 @@ use tokio::sync::broadcast::{channel as broadcast, Receiver, Sender};
 use tonic::{transport::Server, Request, Response, Status};
 use uuid::Uuid;
 
+const PROJECT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const GIT_HASH: &str = env!("GIT_HASH");
+
+const GIT_DESCRIBE: &str = env!("GIT_DESCRIBE");
+
+const GIT_TAG: &str = env!("GIT_TAG");
+
 lazy_static! {
     static ref ENGINE: AsyncOnce<Arc<RusDbEngine>> = AsyncOnce::new(async {
         let conf = config::load().await;
@@ -340,6 +348,24 @@ use simplelog::*;
 
 #[tokio::main]
 async fn main() {
+    println!(
+        "RusDB {} {}{}",
+        PROJECT_VERSION,
+        {
+            if GIT_TAG.len() > 0 {
+                GIT_TAG.to_string()
+            } else {
+                format!("rev {}", GIT_HASH)
+            }
+        },
+        {
+            if GIT_DESCRIBE.len() > 3 {
+                format!(" {}", GIT_DESCRIBE)
+            } else {
+                String::new()
+            }
+        }
+    );
     tokio::spawn(async {
         let conf = config::load().await;
         let log_conf = conf.logging.unwrap_or_default();

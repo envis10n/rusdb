@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use tokio::fs;
-use tokio::sync::broadcast::error::TryRecvError;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
@@ -60,7 +59,6 @@ impl RusDbEngine {
             p.push("collections");
             fs::create_dir_all(&p).await.unwrap();
         }
-        let inner_conf = config.clone();
 
         let engine = Arc::new(Self {
             cache: Arc::new(RwLock::new(BTreeMap::new())),
@@ -70,61 +68,47 @@ impl RusDbEngine {
         let engine_inner = engine.clone();
         let engine_inner_2 = engine.clone();
 
+        let cache_time = config.cache_time as u64;
+        let flush_time = config.flush_time as u64;
+
         tokio::spawn(async move {
             let engine = engine_inner_2;
             let shutdown_ = crate::SHUTDOWN_CHANNEL.0.clone();
-            let mut ticker = SystemTime::now() + Duration::from_secs(10);
             let mut shutdown = shutdown_.subscribe();
-            loop {
-                let engine = engine.clone();
-                match shutdown.try_recv() {
-                    Ok(_) => {
-                        break;
-                    }
-                    Err(err) => match err {
-                        TryRecvError::Empty => {
-                            let now = SystemTime::now();
-                            if now >= ticker {
-                                engine.flush_cache().await;
-                                ticker = SystemTime::now() + Duration::from_secs(10);
-                            }
-                        }
-                        _ => break,
-                    },
+            let flush_task = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60u64 * flush_time)).await;
+                    let engine = engine.clone();
+                    engine.flush_cache().await;
                 }
+            });
+            tokio::select! {
+                _ = flush_task => {},
+                _ = shutdown.recv() => {},
             }
             debug!("Cache timeout flushing task closed.");
             drop(shutdown_);
         });
 
         tokio::spawn(async move {
-            let config = inner_conf;
             let engine = engine_inner;
+            let engine_ = engine.clone();
             let shutdown_ = crate::SHUTDOWN_CHANNEL.0.clone();
             let mut shutdown = shutdown_.subscribe();
-            let mut ticker =
-                SystemTime::now() + Duration::from_secs(60u64 * config.cache_time as u64);
-            loop {
-                let engine = engine.clone();
-                match shutdown.try_recv() {
-                    Ok(_) => {
-                        break;
-                    }
-                    Err(err) => match err {
-                        TryRecvError::Empty => {
-                            let now = SystemTime::now();
-                            if now >= ticker {
-                                engine.sync_cache().await;
-                                ticker = SystemTime::now()
-                                    + Duration::from_secs(60u64 * config.cache_time as u64);
-                            }
-                        }
-                        _ => break,
-                    },
+            let cache_loop = tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(60u64 * cache_time)).await;
+                    let engine = engine.clone();
+                    engine.sync_cache().await;
                 }
+            });
+            tokio::select! {
+                _ = cache_loop => {},
+                _ = shutdown.recv() => {},
             }
-            debug!("Cache sync to disk task has closed.");
-            engine.sync_cache().await;
+            debug!("Cache task loop finished.");
+            engine_.sync_cache().await;
+            drop(shutdown);
             drop(shutdown_);
         });
         engine
